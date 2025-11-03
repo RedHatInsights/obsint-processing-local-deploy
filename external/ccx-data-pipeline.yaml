@@ -1,0 +1,79 @@
+plugins:
+  packages:
+    - ccx_rules_ocp.external
+    - ccx_rules_processing
+  configs:
+    - name: ccx_ocp_core.config.telemeter.TelemeterServiceConfig
+      enabled: false
+service:
+  extract_timeout:
+  extract_tmp_dir:
+  format: ccx_ocp_core.core.formats.json.OCPRecommendationsJsonFormat
+  target_components: []
+  consumer:
+    name: ccx_messaging.consumers.kafka_consumer.KafkaConsumer
+    kwargs:
+      incoming_topic: ${CDP_INCOMING_TOPIC:platform.upload.announce}
+      group.id: ${CDP_GROUP_ID:ccx_data_pipeline_app}
+      bootstrap.servers: ${CDP_CONSUMER_SERVER:["10.34.129.172:9092"]}
+      platform_service: openshift
+      security.protocol: ${CDP_SECURITY_PROTOCOL:SASL_SSL}
+      sasl.mechanisms: PLAIN
+      sasl.username: ${CDP_CONSUMER_USERNAME}
+      sasl.password: ${CDP_CONSUMER_USERPASS}
+      max.poll.interval.ms: 600000
+      heartbeat.interval.ms: 10000
+      session.timeout.ms: 20000
+      dead_letter_queue_topic: ${CDP_DEAD_LETTER_QUEUE_TOPIC:dead.letter.queue}
+  downloader:
+    name: ccx_messaging.downloaders.http_downloader.HTTPDownloader
+    kwargs:
+      max_archive_size: 100MiB
+  engine:
+    name: ccx_messaging.engines.ocp_engine.OCPEngine
+  publisher:
+    name: ccx_messaging.publishers.rule_processing_publisher.RuleProcessingPublisher
+    kwargs:
+      outgoing_topic: ${CDP_OUTGOING_TOPIC:ccx.ocp.results}
+      bootstrap.servers: ${CDP_PUBLISHER_SERVER:10.34.129.172:9092}
+      security.protocol: ${CDP_SECURITY_PROTOCOL:SASL_SSL}
+      sasl.mechanisms: PLAIN
+      sasl.username: ${CDP_PUBLISHER_USERNAME}
+      sasl.password: ${CDP_PUBLISHER_USERPASS}
+  watchers:
+    - name: ccx_messaging.watchers.stats_watcher.StatsWatcher
+      kwargs:
+        prometheus_port: 8000
+    - name: ccx_messaging.watchers.cluster_id_watcher.ClusterIdWatcher
+
+  logging:
+    version: 1
+    disable_existing_loggers: false
+    handlers:
+      default:
+        level: ${LOGLEVEL_STDOUT:-DEBUG}
+        class: logging.StreamHandler
+        stream: ext://sys.stdout
+        formatter: json
+    formatters:
+      brief:
+        format: "%(message)s"
+      json:
+        (): "pythonjsonlogger.jsonlogger.JsonFormatter"
+        format: "%(filename)s %(lineno)d %(process)d %(levelname)s %(asctime)s %(name)s %(message)s"
+      cloudwatch:
+        format: "%(filename)s %(levelname)s %(asctime)s %(name)s %(hostname)s %(mac_address)s %(message)s"
+    root:
+      level: ${LOGLEVEL_ROOT:-WARNING}
+      handlers:
+        - default
+    loggers:
+      insights_messaging:
+        level: ${LOGLEVEL_INSIGHTS_MESSAGING:-DEBUG}
+      insights:
+        level: ${LOGLEVEL_INSIGHTS:-WARNING}
+      ccx_data_pipeline:
+        level: ${LOGLEVEL_CCX_DATA_PIPELINE:-DEBUG}
+      ccx_messaging:
+        level: ${LOGLEVEL_CCX_MESSAGING:-DEBUG}
+

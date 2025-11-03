@@ -1,0 +1,413 @@
+services:
+
+  ####################################################################################################
+  # Auxiliar services the external data pipeline needs
+  ####################################################################################################
+
+  db:
+    container_name: db
+    ports:
+      - 5432:5432
+    image: registry.redhat.io/rhscl/postgresql-13-rhel7
+    environment:
+      - POSTGRESQL_USER=user
+      - POSTGRESQL_PASSWORD=password
+      - POSTGRESQL_ADMIN_PASSWORD=admin
+      - POSTGRESQL_DATABASE=aggregator
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  notification_db:
+    container_name: notification_db
+    ports:
+      - 5433:5432
+    image: registry.redhat.io/rhscl/postgresql-13-rhel7
+    environment:
+      - POSTGRESQL_USER=user
+      - POSTGRESQL_PASSWORD=password
+      - POSTGRESQL_ADMIN_PASSWORD=admin
+      - POSTGRESQL_DATABASE=notifications
+
+  kafka:
+    container_name: kafka
+    image: bitnami/kafka:3.8
+    ports:
+      - 9092:9092
+      - 9093:9093
+    environment:
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_NODE_ID=0
+      - KAFKA_CFG_LISTENERS=INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=INTERNAL
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server kafka:29092 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+
+  kafka-topic-creator:
+    container_name: kafka-topic-creator
+    image: bitnami/kafka:latest
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "
+      sleep 10;
+      kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:29092 --replication-factor 1 --partitions 1 --topic platform.upload.announce;
+      kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:29092 --replication-factor 1 --partitions 1 --topic dvo.results;
+      kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:29092 --replication-factor 1 --partitions 1 --topic ccx.ocp.results;
+      "
+
+  redis:
+    container_name: redis
+    image: redis
+    ports:
+      - 6379:6379
+    command: /bin/bash -c "redis-server --requirepass password"
+
+  minio:
+    container_name: minio
+    image: quay.io/ccxdev/minio-server-ubi:latest
+    command:
+      - server
+      - /data
+      - --console-address
+      - ":9001"
+    ports:
+      - 9000:9000
+      - 9001:9001
+    environment:
+      - MINIO_ACCESS_KEY=minio
+      - MINIO_SECRET_KEY=minio123
+
+  createbuckets:
+    container_name: createbuckets
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint:
+      - /bin/sh
+      - -c
+      - "sleep 5;
+      /usr/bin/mc config host add minio http://minio:9000 minio minio123;
+      /usr/bin/mc mb minio/insights-upload-perma;
+      /usr/bin/mc mb minio/insights-upload-rejected;
+      exit 0;
+      "
+
+  ingress:
+    container_name: ingress
+    # you can build the image from these sources
+    # https://github.com/RedHatInsights/insights-ingress-go
+    image: ingress
+    ports:
+      - 3000:3000
+    environment:
+      - INGRESS_STAGEBUCKET=insights-upload-perma
+      - INGRESS_REJECTBUCKET=insights-upload-rejected
+      - INGRESS_VALID_UPLOAD_TYPES=openshift
+      - OPENSHIFT_BUILD_COMMIT=woopwoop
+      - INGRESS_MINIODEV=true
+      - INGRESS_MINIOACCESSKEY=minio
+      - INGRESS_MINIOSECRETKEY=minio123
+      - INGRESS_MINIOENDPOINT=minio:9000
+      - INGRESS_KAFKA_BROKERS=kafka:29092
+    depends_on:
+      - kafka
+      - minio
+
+  rhobs-mock:
+    container_name: rhobs-mock
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/obsint-mocks/obsint-mocks:latest
+    ports:
+      - 8081:8080
+
+  mock-oauth2-server:
+    container_name: mock-oauth2-server
+    image: ghcr.io/navikt/mock-oauth2-server:0.5.8
+    environment:
+      - LOG_LEVEL=DEBUG
+    ports:
+      - 8080:8080 
+
+  ####################################################################################################
+  # Core services
+  ####################################################################################################
+
+  ccx-data-pipeline:
+    container_name: ccx-data-pipeline
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/data-pipeline/data-pipeline:latest
+    environment:
+      - CDP_PUBLISHER_SERVER=kafka:29092
+      - CDP_CONSUMER_SERVER=kafka:29092
+      - CDP_INCOMING_TOPIC=platform.upload.announce
+      - CDP_SECURITY_PROTOCOL=PLAINTEXT
+      - CDP_GROUP_ID=ccx_data_pipeline
+      - LOGLEVEL_STDOUT=DEBUG
+      - LOGLEVEL_ROOT=WARNING
+      - LOGLEVEL_CCX_DATA_PIPELINE=DEBUG
+      - LOGLEVEL_CCX_MESSAGING=DEBUG
+      - LOGLEVEL_INSIGHTS_MESSAGING=DEBUG
+      - LOGLEVEL_INSIGHTS=WARNING
+    volumes:
+      - ./ccx-data-pipeline.yaml:/config.yaml
+    command: "ccx-messaging /config.yaml"
+    depends_on:
+      kafka:
+        condition: service_started
+      kafka-topic-creator:
+        condition: service_completed_successfully
+
+  db-writer:
+    container_name: db-writer
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/aggregator/aggregator:latest
+    environment:
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__TYPE=sql
+      - INSIGHTS_RESULTS_AGGREGATOR__STORAGE_BACKEND__USE=ocp_recommendations
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__DB_DRIVER=postgres
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_PARAMS=sslmode=disable
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_USERNAME=user
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_PASSWORD=password
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_HOST=db
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_PORT=5432
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_DB_NAME=aggregator
+      - INSIGHTS_RESULTS_AGGREGATOR__LOGGING__LOG_LEVEL=debug
+      - INSIGHTS_RESULTS_AGGREGATOR__LOGGING__DEBUG=true
+      - INSIGHTS_RESULTS_AGGREGATOR__SERVER__API_SPEC_FILE=/openapi/openapi.json
+      - INSIGHTS_RESULTS_AGGREGATOR__SERVER__ADDRESS=:8085
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__ADDRESSES=kafka:29092
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__TOPIC=ccx.ocp.results
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__SERVICE_NAME=insights-results-db-writer
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__GROUP=test-consumer-group
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__ENABLED=true
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__ENABLE_ORG_WHITELIST=false
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__TIMEOUT=300s
+    command: bash -c "/insights-results-aggregator migration latest && /insights-results-aggregator"
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  aggregator:
+    container_name: aggregator
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/aggregator/aggregator:latest
+    environment:
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__TYPE=sql
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__DB_DRIVER=postgres
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_PARAMS=sslmode=disable
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_USERNAME=user
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_PASSWORD=password
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_HOST=db
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_PORT=5432
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_DB_NAME=aggregator
+      - INSIGHTS_RESULTS_AGGREGATOR__LOGGING__LOG_LEVEL=debug
+      - INSIGHTS_RESULTS_AGGREGATOR__LOGGING__DEBUG=true
+      - INSIGHTS_RESULTS_AGGREGATOR__SERVER__API_PREFIX=/api/v1/
+      - INSIGHTS_RESULTS_AGGREGATOR__SERVER__API_SPEC_FILE=/openapi/openapi.json
+      - INSIGHTS_RESULTS_AGGREGATOR__SERVER__ADDRESS=:8082
+    ports:
+      - 8082:8082
+    depends_on:
+      db-writer:
+        condition: service_started
+      db:
+        condition: service_healthy
+
+  content-service:
+    container_name: content-service
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/content-service/content-service:latest
+    environment:
+      - INSIGHTS_CONTENT_SERVICE__SERVER__ADDRESS=:8081
+      - INSIGHTS_CONTENT_SERVICE__SERVER__API_PREFIX=/api/v1/
+      - INSIGHTS_CONTENT_SERVICE__SERVER__API_SPEC_FILE=/openapi/openapi.json
+      - INSIGHTS_CONTENT_SERVICE__GROUPS__PATH=/groups/groups_config.yaml
+
+  cache-writer:
+    container_name: cache-writer
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/aggregator/aggregator:latest
+    environment:
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__TYPE=redis
+      - INSIGHTS_RESULTS_AGGREGATOR__STORAGE_BACKEND__USE=ocp_recommendations
+      - INSIGHTS_RESULTS_AGGREGATOR__REDIS__DATABASE=0
+      - INSIGHTS_RESULTS_AGGREGATOR__REDIS__ENDPOINT=redis:6379
+      - INSIGHTS_RESULTS_AGGREGATOR__REDIS__PASSWORD=password
+      - INSIGHTS_RESULTS_AGGREGATOR__REDIS__TIMEOUT_SECONDS=30
+      - INSIGHTS_RESULTS_AGGREGATOR__SERVER__API_SPEC_FILE=/openapi/openapi.json
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__ADDRESSES=kafka:29092
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__SERVICE_NAME=insights-results-cache-writer
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__TOPIC=ccx.ocp.results
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__GROUP=test-cache-consumer-group
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__ENABLED=true
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__TIMEOUT=300s
+      - INSIGHTS_RESULTS_AGGREGATOR__LOGGING__LOG_LEVEL=debug
+      - INSIGHTS_RESULTS_AGGREGATOR__LOGGING__DEBUG=true
+    depends_on:
+      redis:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  dvo-extractor:
+    container_name: dvo-extractor
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/data-pipeline/data-pipeline:latest
+    environment:
+      - CDP_PUBLISHER_SERVER=kafka:29092
+      - CDP_CONSUMER_SERVER=kafka:29092
+      - CDP_GROUP_ID=dvo_extractor
+      - CDP_INCOMING_TOPIC=platform.upload.announce
+      - CDP_OUTGOING_TOPIC=dvo.results
+      - CDP_SECURITY_PROTOCOL=PLAINTEXT
+      - PAYLOAD_TRACKER_TOPIC=platform.payload-status
+      - LOGLEVEL_STDOUT=DEBUG
+      - LOGLEVEL_ROOT=WARNING
+      - LOGLEVEL_DVO_EXTRACTOR=DEBUG
+      - LOGLEVEL_CCX_MESSAGING=DEBUG
+      - LOGLEVEL_INSIGHTS_MESSAGING=DEBUG
+      - LOGLEVEL_INSIGHTS=WARNING
+    volumes:
+      - ./dvo-extractor-config.yaml:/ccx-data-pipeline/config.yaml
+    depends_on:
+      kafka:
+        condition: service_started
+      kafka-topic-creator:
+        condition: service_completed_successfully
+
+  dvo-writer:
+    container_name: dvo-writer
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/aggregator/aggregator:latest
+    environment:
+      - INSIGHTS_RESULTS_AGGREGATOR__STORAGE_BACKEND__USE=dvo_recommendations
+      - INSIGHTS_RESULTS_AGGREGATOR__DVO_RECOMMENDATIONS_STORAGE__DB_DRIVER=postgres
+      - INSIGHTS_RESULTS_AGGREGATOR__DVO_RECOMMENDATIONS_STORAGE__PG_PARAMS=sslmode=disable
+      - INSIGHTS_RESULTS_AGGREGATOR__DVO_RECOMMENDATIONS_STORAGE__LOG_SQL_QUERIES=true
+      - INSIGHTS_RESULTS_AGGREGATOR__DVO_RECOMMENDATIONS_STORAGE__TYPE=sql
+      - INSIGHTS_RESULTS_AGGREGATOR__DVO_RECOMMENDATIONS_STORAGE__PG_USERNAME=user
+      - INSIGHTS_RESULTS_AGGREGATOR__DVO_RECOMMENDATIONS_STORAGE__PG_PASSWORD=password
+      - INSIGHTS_RESULTS_AGGREGATOR__DVO_RECOMMENDATIONS_STORAGE__PG_HOST=db
+      - INSIGHTS_RESULTS_AGGREGATOR__DVO_RECOMMENDATIONS_STORAGE__PG_PORT=5432
+      - INSIGHTS_RESULTS_AGGREGATOR__DVO_RECOMMENDATIONS_STORAGE__PG_DB_NAME=aggregator
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__TYPE=sql
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__DB_DRIVER=postgres
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_PARAMS=sslmode=disable
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_USERNAME=user
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_PASSWORD=password
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_HOST=db
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_PORT=5432
+      - INSIGHTS_RESULTS_AGGREGATOR__OCP_RECOMMENDATIONS_STORAGE__PG_DB_NAME=aggregator
+      - INSIGHTS_RESULTS_AGGREGATOR__LOGGING__LOG_LEVEL=debug
+      - INSIGHTS_RESULTS_AGGREGATOR__LOGGING__DEBUG=true
+      - INSIGHTS_RESULTS_AGGREGATOR__SERVER__API_SPEC_FILE=/openapi/openapi.json
+      - INSIGHTS_RESULTS_AGGREGATOR__SERVER__ADDRESS=:8085
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__ADDRESSES=kafka:29092
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__TOPIC=dvo.results
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__SERVICE_NAME=dvo-writer
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__GROUP=dvo_writer_app
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__ENABLED=true
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__ENABLE_ORG_WHITELIST=false
+      - INSIGHTS_RESULTS_AGGREGATOR__BROKER__TIMEOUT=300s
+    command: bash -c "/insights-results-aggregator migration latest && /insights-results-aggregator"
+    depends_on:
+      db:
+        condition: service_healthy
+      db-writer:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      kafka-topic-creator:
+        condition: service_completed_successfully
+
+  smart-proxy:
+    container_name: smart-proxy
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/smart-proxy/smart-proxy:latest
+    environment:
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__ADDRESS=:8080
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__API_DBG_PREFIX=/api/dbg/
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__API_V1_PREFIX=/api/v1/
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__API_V2_PREFIX=/api/v2/
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__API_V1_SPEC_FILE=/openapi/v1/openapi.json
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__API_V2_SPEC_FILE=/openapi/v2/openapi.json
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVICES__GROUPS_POLL_TIME=60s
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVICES__CONTENT=http://content-service:8081/api/v1/
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVICES__AGGREGATOR=http://aggregator:8082/api/v1/
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVICES__UPGRADE_RISKS_PREDICTION=http://ccx-upgrades-data-eng:8000/
+      - INSIGHTS_RESULTS_SMART_PROXY__REDIS__ENDPOINT=redis:6379
+      - INSIGHTS_RESULTS_SMART_PROXY__REDIS__DATABASE=0
+      - INSIGHTS_RESULTS_SMART_PROXY__REDIS__PASSWORD=password
+      - INSIGHTS_RESULTS_SMART_PROXY__REDIS__TIMEOUT_SECONDS=30
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__DEBUG=true
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__AUTH=true
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__AUTH_TYPE=xrh
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__USE_HTTPS=false
+      - INSIGHTS_RESULTS_SMART_PROXY__SERVER__ORG_CLUSTERS_FALLBACK=true
+    ports:
+      - 8083:8080
+    command: "/insights-results-smart-proxy"
+    depends_on:
+      - content-service
+
+  ccx-upgrades-data-eng:
+    container_name: ccx-upgrades-data-eng
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/upgrades-data-eng/upgrades-data-eng:latest
+    ports:
+      - 8000:8000
+    environment:
+      - INFERENCE_URL=http://ccx-upgrades-inference:8000
+      - CLIENT_ID=test-id
+      - CLIENT_SECRET=test-secret
+      - SSO_ISSUER=http://mock-oauth2-server:8080/default
+      - ALLOW_INSECURE=1
+      - RHOBS_URL=http://rhobs-mock:8080
+      - OAUTHLIB_INSECURE_TRANSPORT=1
+      - CACHE_ENABLED=0
+      - CACHE_TTL=0
+      - LOG_LEVEL=DEBUG
+    depends_on:
+      - mock-oauth2-server
+    restart: always  # needed because it takes some time to connect to mock-oauth2-server
+ 
+  ccx-upgrades-inference:
+    container_name: ccx-upgrades-inference
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/upgrades-inference/upgrades-inference:latest
+    ports:
+      - 8001:8000
+  
+  notification-writer:
+    container_name: notification-writer
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/notification-writer/notification-writer:latest
+    environment:
+      - CCX_NOTIFICATION_WRITER__BROKER__ADDRESSES=kafka:29092
+      - CCX_NOTIFICATION_WRITER__BROKER__TOPIC=ccx.ocp.results
+      - CCX_NOTIFICATION_WRITER__BROKER__GROUP=notification-writer
+      - CCX_NOTIFICATION_WRITER__BROKER__ENABLED=true
+      - CCX_NOTIFICATION_WRITER__STORAGE__DB_DRIVER=postgres
+      - CCX_NOTIFICATION_WRITER__STORAGE__PG_PARAMS=sslmode=disable
+      - CCX_NOTIFICATION_WRITER__STORAGE__PG_USERNAME=user
+      - CCX_NOTIFICATION_WRITER__STORAGE__PG_PASSWORD=password
+      - CCX_NOTIFICATION_WRITER__STORAGE__PG_HOST=notification_db
+      - CCX_NOTIFICATION_WRITER__STORAGE__PG_PORT=5432
+      - CCX_NOTIFICATION_WRITER__STORAGE__PG_DB_NAME=notifications
+      - CCX_NOTIFICATION_WRITER__LOGGING__DEBUG=true
+      - CCX_NOTIFICATION_WRITER__LOGGING__LOG_LEVEL=debug
+    depends_on:
+      notification_db:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      kafka-topic-creator:
+        condition: service_completed_successfully

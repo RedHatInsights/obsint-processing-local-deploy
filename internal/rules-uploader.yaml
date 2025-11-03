@@ -1,0 +1,66 @@
+plugins:
+  default_component_enabled: true
+  packages:
+    - ccx_messaging
+service:
+  extract_timeout:
+  extract_tmp_dir:
+  format: insights.formats._json.JsonFormat
+  target_components: []
+  consumer:
+    name: ccx_messaging.consumers.rules_results_consumer.RulesResultsConsumer
+    kwargs:
+      incoming_topic: ${KAFKA_INCOMING_TOPIC}
+      group.id: ${KAFKA_GROUP_ID}
+      bootstrap.servers: ${KAFKA_SERVER}
+      processing_timeout_s: 0
+      max.poll.interval.ms: 600000
+      heartbeat.interval.ms: 10000
+      session.timeout.ms: 20000
+  downloader:
+    name: insights_messaging.downloaders.localfs.LocalFS
+  engine:
+    name: ccx_messaging.engines.s3_upload_engine.S3UploadEngine
+    kwargs:
+        dest_bucket: ${TARGET_S3_BUCKET}
+        access_key: ${S3_ACCESS_KEY}
+        secret_key: ${S3_SECRET_KEY}
+        endpoint: ${S3_ENDPOINT}
+        archive_name_pattern: "$report_path"
+  publisher:
+    name: insights_messaging.publishers.Publisher
+  watchers:
+    - name: ccx_messaging.watchers.stats_watcher.StatsWatcher
+      kwargs:
+        prometheus_port: 8000
+    - name: ccx_messaging.watchers.payload_tracker_watcher.PayloadTrackerWatcher
+      kwargs:
+        bootstrap.servers: ${KAFKA_SERVER}
+        topic: ${PAYLOAD_TRACKER_TOPIC}
+        service_name: rules-uploader
+  logging:
+    version: 1
+    disable_existing_loggers: false
+    handlers:
+      default:
+        level: ${LOGLEVEL_STDOUT}
+        class: logging.StreamHandler
+        stream: ext://sys.stdout
+        formatter: default
+    formatters:
+      default:
+        format: '%(asctime)s %(name)s %(levelname)-8s %(message)s'
+        datefmt: '%Y-%m-%d %H:%M:%S'
+    root:
+      level: ${LOGLEVEL_ROOT}
+      handlers:
+        - default
+    loggers:
+      ccx_messaging:
+        level: ${LOGLEVEL_CCX_MESSAGING}
+      insights_messaging:
+        level: ${LOGLEVEL_INSIGHTS_MESSAGING}
+      insights:
+        level: ${LOGLEVEL_INSIGHTS}
+      kafka:
+        level: ${LOGLEVEL_KAFKA}

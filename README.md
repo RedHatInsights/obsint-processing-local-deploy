@@ -1,4 +1,4 @@
-# ObsInt Processing Local Helpers
+# ObsInt Processing Local Deployment
 
 This repository contains files necessary to run containerized version of services 
 maintained by Observability Intelligence Processing Team locally. The purpose is to provide 
@@ -6,9 +6,9 @@ an alternative to full deployment of these services in ephemeral environment and
 to make future development of these service easier.
 
 The repository contains two directories, `external` and `internal`, both containing configuration 
-files needed to run services for external data pipeline or internal data pipeline respectivelly.
+files needed to run services for external data pipeline or internal data pipeline respectively.
 
-## Prerequisities
+## Prerequisites
 
 For running the containers using this repository, you need to have:
 
