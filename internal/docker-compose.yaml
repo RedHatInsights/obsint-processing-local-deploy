@@ -1,0 +1,296 @@
+services:
+
+  ingress:
+    container_name: ingress
+    # you can build the image from these sources
+    # https://github.com/RedHatInsights/insights-ingress-go
+    image: ingress
+    ports:
+      - 3000:3000
+    environment:
+      - INGRESS_STAGEBUCKET=internal-storage-io
+      - INGRESS_REJECTBUCKET=insights-upload-rejected
+      - INGRESS_VALID_UPLOAD_TYPES=openshift
+      - OPENSHIFT_BUILD_COMMIT=woopwoop
+      - INGRESS_MINIODEV=true
+      - INGRESS_MINIOACCESSKEY=minio
+      - INGRESS_MINIOSECRETKEY=minio123
+      - INGRESS_MINIOENDPOINT=minio:9000
+      - INGRESS_KAFKA_BROKERS=kafka:9092
+    depends_on:
+      - kafka
+      - minio
+
+  kafka:
+    platform: linux/amd64
+    container_name: kafka
+    image: quay.io/ccxdev/kafka-no-zk:latest
+    hostname: kafka
+    ports:
+      - 9092:9092
+    environment:
+      - KAFKA_ADVERTISED_HOST_NAME=kafka
+      - KAFKA_CREATE_TOPICS=ccx.archive.synced:1:1,ccx.new.archive.ols:1:1,platform.upload.announce:1:1,prod-archive-synced:1:1,ccx.new.archive.io:1:1,platform.payload-status:1:1,ccx.insights.rules.results:1:1,platform.payload-status:1:1
+
+  kafka-topics-waiter:
+    image: edenhill/kcat:1.7.1
+    container_name: kafka-topics-waiter
+    depends_on:
+      - kafka
+    entrypoint: [ '/bin/sh', '-c' ]
+    command:
+      - |
+        echo 'Waiting for Kafka broker to be available...';
+        until kcat -L -b kafka:9092 > /dev/null 2>&1; do
+        echo '...Kafka not ready yet, sleeping.';
+        sleep 2;
+        done;
+
+        echo 'Kafka is up. Now checking for topics...';
+        topics_to_wait_for="ccx.archive.synced ccx.new.archive.ols platform.upload.announce prod-archive-synced ccx.new.archive.io platform.payload-status ccx.insights.rules.results"
+
+        for topic_name in $$topics_to_wait_for; do
+        echo "--> Checking for topic: [$$topic_name]...";
+        until kcat -L -b kafka:9092 | grep -q -w "$$topic_name"; do
+            echo "    ...topic [$$topic_name] not found yet, sleeping.";
+            sleep 2;
+        done;
+        echo "--> Topic [$$topic_name] found!";
+        done;
+
+        echo 'All required Kafka topics are ready!';        
+
+  minio:
+    container_name: minio
+    image: minio/minio:latest
+    ports:
+      - 9000:9000
+      - 9001:9001  # console
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=minio123
+      - MINIO_CONSOLE_ADDRESS=0.0.0.0:9001
+    command:
+    - server
+    - /data
+
+  createbuckets:
+    container_name: createbuckets
+    image: minio/mc:latest
+    depends_on: 
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+          sleep 10;
+          mc alias set minio http://minio:9000 minio minio123 &&
+          mc mb minio/external-storage &&
+          mc mb minio/internal-storage-io &&
+          mc mb minio/internal-storage-ols &&
+          mc mb minio/ccx-bucket &&
+          tail -f /dev/null
+      "    
+
+  multiplexor:
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
+    platform: linux/amd64
+    container_name: multiplexor
+    command:
+      - ccx-messaging
+      - /multiplexor.yaml
+    volumes:
+      - ./multiplexor.yaml:/multiplexor.yaml
+    environment:
+      - KAFKA_SERVER=kafka:9092
+      - KAFKA_INCOMING_TOPIC=platform.upload.announce
+      - KAFKA_PLATFORM_SERVICE=openshift
+      - KAFKA_GROUP_ID=multiplexor_group_local
+      - KAFKA_OUTGOING_TOPIC_OLS=ccx.new.archive.ols
+      - KAFKA_OUTGOING_TOPIC_IO=ccx.new.archive.io
+      - PAYLOAD_TRACKER_TOPIC=platform.payload-status
+      - LOGLEVEL_STDOUT=INFO
+      - LOGLEVEL_ROOT=WARNING
+      - LOGLEVEL_CCX_MESSAGING=INFO
+      - LOGLEVEL_INSIGHTS_MESSAGING=WARNING
+      - LOGLEVEL_INSIGHTS=WARNING
+      - LOGLEVEL_KAFKA=WARNING
+      - CLOWDER_ENABLED=false
+      - SENTRY_ENABLED=false
+      - ALLOW_UNSAFE_LINKS=true
+    restart: on-failure
+    depends_on:
+      kafka-topics-waiter:
+        condition: service_completed_successfully
+      minio:
+        condition: service_started
+
+  archive-sync:
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
+    platform: linux/amd64
+    container_name: archive-sync
+    command:
+      - ccx-messaging
+      - /archive-sync.yaml
+    volumes:
+      - ./archive-sync.yaml:/archive-sync.yaml
+    environment:
+      - KAFKA_URL=kafka:9092
+      - KAFKA_SERVER=kafka
+      - KAFKA_INCOMING_TOPIC=ccx.new.archive.io
+      - KAFKA_OUTGOING_TOPIC=ccx.archive.synced
+      - KAFKA_GROUP_ID=archive-sync-group
+      - PAYLOAD_TRACKER_TOPIC=platform.payload-status
+
+      - EXTERNAL_S3_URL=http://minio:9000
+      - EXTERNAL_S3_ACCESS_KEY=minio
+      - EXTERNAL_S3_SECRET_KEY=minio123
+      - EXTERNAL_S3_BUCKET=external-storage
+      - TARGET_S3_BUCKET=ccx-bucket
+
+      - ALLOW_UNSAFE_LINKS=true
+      - CLOWDER_ENABLED=false
+      - SENTRY_ENABLED=false
+
+      - LOGLEVEL_STDOUT=DEBUG
+      - LOGLEVEL_ROOT=WARNING
+      - LOGLEVEL_CCX_MESSAGING=DEBUG
+      - LOGLEVEL_INSIGHTS_MESSAGING=DEBUG
+      - LOGLEVEL_INSIGHTS=DEBUG
+      - LOGLEVEL_KAFKA=DEBUG
+    restart: on-failure
+    depends_on:
+      kafka-topics-waiter:
+        condition: service_completed_successfully
+      minio:
+        condition: service_started
+
+  rules-processing:
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/data-pipeline/data-pipeline:latest
+    platform: linux/amd64
+    container_name: rules-processing
+    command:
+      - ccx-messaging
+      - /rules-processing.yaml
+    volumes:
+      - ./rules-processing.yaml:/rules-processing.yaml
+      - ./ccx-extract:/var/tmp/ccx
+    environment:
+      - KAFKA_SYNCED_TOPIC=ccx.archive.synced
+      - KAFKA_GROUP_ID=ccx-rules-processing-service
+      - KAFKA_URL=kafka:9092
+      - PAYLOAD_TRACKER_TOPIC=platform.payload-status
+
+      - S3_ACCESS_KEY=minio
+      - S3_SECRET_KEY=minio123
+      - SOURCE_S3_BUCKET=ccx-bucket
+      - S3_ENDPOINT=http://minio:9000
+
+      - CLOWDER_ENABLED=false
+      - SENTRY_ENABLED=false
+      - KAFKA_RULES_TOPIC=ccx.insights.rules.results
+
+      - LOGLEVEL_STDOUT=DEBUG
+      - LOGLEVEL_ROOT=WARNING
+      - LOGLEVEL_CCX_MESSAGING=DEBUG
+      - LOGLEVEL_INSIGHTS_MESSAGING=DEBUG
+      - LOGLEVEL_INSIGHTS=DEBUG
+      - LOGLEVEL_KAFKA=WARNING
+    restart: on-failure
+    depends_on:
+      kafka-topics-waiter:
+        condition: service_completed_successfully
+      minio:
+        condition: service_started
+
+  parquet-factory:
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/parquet-factory/parquet-factory:latest
+    platform: linux/amd64
+    container_name: parquet-factory
+    command: [ "./parquet-factory" ]
+    environment:
+      - PARQUET_FACTORY__KAFKA_RULES__TOPIC=ccx.insights.rules.results
+      - PARQUET_FACTORY__KAFKA_RULES__GROUP_ID=ccx_parquet_factory_group
+      - PARQUET_FACTORY__KAFKA_RULES__ADDRESS=kafka:9092
+      - PARQUET_FACTORY__KAFKA_RULES__CONSUMER_TIMEOUT=460
+      - PARQUET_FACTORY__S3__ENDPOINT=http://minio:9000
+      - PARQUET_FACTORY__S3__BUCKET=ccx-bucket
+      - PARQUET_FACTORY__S3__PREFIX=fleet_aggregations
+      - PARQUET_FACTORY__S3__USE_SSL=false
+      - PARQUET_FACTORY__S3__ACCESS_KEY=minio
+      - PARQUET_FACTORY__S3__SECRET_KEY=minio123
+      - PARQUET_FACTORY__METRICS__JOB_NAME=parquet-factory
+      - PARQUET_FACTORY__LOGGING__LOGGING_TO_SENTRY_ENABLED=false
+      - PARQUET_FACTORY__LOGGING__LOGGING_TO_CLOUD_WATCH_ENABLED=false
+      - PARQUET_FACTORY__METRICS__GATEWAY_URL=http://pushgateway:9091
+    restart: always
+    depends_on:
+      kafka-topics-waiter:
+        condition: service_completed_successfully
+      minio:
+        condition: service_started
+
+  rules-uploader:
+    container_name: rules-uploader
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
+    platform: linux/amd64
+    working_dir: /data-pipeline
+    command:
+      - ccx-messaging
+      - /rules-uploader.yaml
+    volumes:
+      - ./rules-uploader.yaml:/rules-uploader.yaml
+    environment:
+      - KAFKA_GROUP_ID=rules_uploader_app
+      - KAFKA_SERVER=kafka:9092
+      - KAFKA_INCOMING_TOPIC=ccx.insights.rules.results
+      - PAYLOAD_TRACKER_TOPIC=platform.payload-status
+
+      - S3_ACCESS_KEY=minio
+      - S3_SECRET_KEY=minio123
+      - S3_ENDPOINT=http://minio:9000
+      - TARGET_S3_BUCKET=ccx-bucket
+      - ALLOW_UNSAFE_LINKS=true
+
+      - CLOWDER_ENABLED=false
+      - CLOUDWATCH_DEBUG=false
+      - CW_LOG_STREAM=rules-uploader
+      - ENV_NAME=dev
+      - SENTRY_ENABLED=false
+
+
+      - LOGLEVEL_CCX_MESSAGING=DEBUG
+      - LOGLEVEL_INSIGHTS_MESSAGING=DEBUG
+      - LOGLEVEL_INSIGHTS=DEBUG
+      - LOGLEVEL_KAFKA=DEBUG
+      - LOGLEVEL_STDOUT=DEBUG
+      - LOGLEVEL_ROOT=DEBUG
+      - LOGGING_TO_CW_ENABLED=false
+    restart: on-failure
+    depends_on:
+      kafka-topics-waiter:
+        condition: service_completed_successfully
+      minio:
+        condition: service_started
+
+  pushgateway:
+    image: prom/pushgateway:v1.8.0
+    container_name: pushgateway
+    ports:
+      - "9091:9091"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yaml'
+    restart: unless-stopped
+    depends_on:
+      - pushgateway
+
+networks:
+  default:
+    name: internal-data-pipeline
