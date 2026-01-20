@@ -30,7 +30,7 @@ services:
       - 9092:9092
     environment:
       - KAFKA_ADVERTISED_HOST_NAME=kafka
-      - KAFKA_CREATE_TOPICS=ccx.archive.synced:1:1,ccx.new.archive.ols:1:1,platform.upload.announce:1:1,prod-archive-synced:1:1,ccx.new.archive.io:1:1,platform.payload-status:1:1,ccx.insights.rules.results:1:1,platform.payload-status:1:1
+      - KAFKA_CREATE_TOPICS=ccx.archive.synced:1:1,platform.upload.announce:1:1,ccx.insights.rules.results:1:1,platform.payload-status:1:1
 
   kafka-topics-waiter:
     image: edenhill/kcat:1.7.1
@@ -47,7 +47,7 @@ services:
         done;
 
         echo 'Kafka is up. Now checking for topics...';
-        topics_to_wait_for="ccx.archive.synced ccx.new.archive.ols platform.upload.announce prod-archive-synced ccx.new.archive.io platform.payload-status ccx.insights.rules.results"
+        topics_to_wait_for="ccx.archive.synced platform.upload.announce platform.payload-status ccx.insights.rules.results"
 
         for topic_name in $$topics_to_wait_for; do
         echo "--> Checking for topic: [$$topic_name]...";
@@ -85,43 +85,9 @@ services:
           mc alias set minio http://minio:9000 minio minio123 &&
           mc mb minio/external-storage &&
           mc mb minio/internal-storage-io &&
-          mc mb minio/internal-storage-ols &&
           mc mb minio/ccx-bucket &&
           tail -f /dev/null
       "    
-
-  multiplexor:
-    image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
-    platform: linux/amd64
-    container_name: multiplexor
-    command:
-      - ccx-messaging
-      - /multiplexor.yaml
-    volumes:
-      - ./multiplexor.yaml:/multiplexor.yaml
-    environment:
-      - KAFKA_SERVER=kafka:9092
-      - KAFKA_INCOMING_TOPIC=platform.upload.announce
-      - KAFKA_PLATFORM_SERVICE=openshift
-      - KAFKA_GROUP_ID=multiplexor_group_local
-      - KAFKA_OUTGOING_TOPIC_OLS=ccx.new.archive.ols
-      - KAFKA_OUTGOING_TOPIC_IO=ccx.new.archive.io
-      - PAYLOAD_TRACKER_TOPIC=platform.payload-status
-      - LOGLEVEL_STDOUT=INFO
-      - LOGLEVEL_ROOT=WARNING
-      - LOGLEVEL_CCX_MESSAGING=INFO
-      - LOGLEVEL_INSIGHTS_MESSAGING=WARNING
-      - LOGLEVEL_INSIGHTS=WARNING
-      - LOGLEVEL_KAFKA=WARNING
-      - CLOWDER_ENABLED=false
-      - SENTRY_ENABLED=false
-      - ALLOW_UNSAFE_LINKS=true
-    restart: on-failure
-    depends_on:
-      kafka-topics-waiter:
-        condition: service_completed_successfully
-      minio:
-        condition: service_started
 
   archive-sync:
     image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
@@ -135,9 +101,10 @@ services:
     environment:
       - KAFKA_URL=kafka:9092
       - KAFKA_SERVER=kafka
-      - KAFKA_INCOMING_TOPIC=ccx.new.archive.io
+      - KAFKA_PLATFORM_SERVICE=openshift
+      - KAFKA_INCOMING_TOPIC=platform.upload.announce
       - KAFKA_OUTGOING_TOPIC=ccx.archive.synced
-      - KAFKA_GROUP_ID=archive-sync-group
+      - KAFKA_GROUP_ID=multiplexor_app
       - PAYLOAD_TRACKER_TOPIC=platform.payload-status
 
       - EXTERNAL_S3_URL=http://minio:9000
@@ -255,7 +222,6 @@ services:
       - CW_LOG_STREAM=rules-uploader
       - ENV_NAME=dev
       - SENTRY_ENABLED=false
-
 
       - LOGLEVEL_CCX_MESSAGING=DEBUG
       - LOGLEVEL_INSIGHTS_MESSAGING=DEBUG
