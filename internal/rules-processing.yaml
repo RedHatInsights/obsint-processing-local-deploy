@@ -1,7 +1,7 @@
 plugins:
+  default_component_enabled: true
   packages:
-    - ccx_rules_ocp
-    - ccx_rules_processing
+    - ccx_messaging
 service:
   extract_timeout:
   extract_tmp_dir: /var/tmp/ccx 

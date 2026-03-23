@@ -5,6 +5,7 @@ services:
   ####################################################################################################
 
   db:
+    platform: linux/amd64
     container_name: db
     ports:
       - 5432:5432
@@ -21,6 +22,7 @@ services:
       retries: 5
 
   notification_db:
+    platform: linux/amd64
     container_name: notification_db
     ports:
       - 5433:5432
@@ -32,8 +34,9 @@ services:
       - POSTGRESQL_DATABASE=notifications
 
   kafka:
+    platform: linux/amd64
     container_name: kafka
-    image: bitnami/kafka:3.8
+    image: docker.io/bitnami/kafka:3.8
     ports:
       - 9092:9092
       - 9093:9093
@@ -55,8 +58,9 @@ services:
       start_period: 10s
 
   kafka-topic-creator:
+    platform: linux/amd64
     container_name: kafka-topic-creator
-    image: bitnami/kafka:latest
+    image: docker.io/bitnami/kafka:latest
     depends_on:
       - kafka
     entrypoint: ["/bin/bash", "-c"]
@@ -69,15 +73,17 @@ services:
       "
 
   redis:
+    platform: linux/amd64
     container_name: redis
-    image: redis
+    image: docker.io/library/redis
     ports:
       - 6379:6379
     command: /bin/bash -c "redis-server --requirepass password"
 
   minio:
+    platform: linux/amd64
     container_name: minio
-    image: quay.io/ccxdev/minio-server-ubi:latest
+    image: docker.io/minio/minio:latest
     command:
       - server
       - /data
@@ -91,8 +97,9 @@ services:
       - MINIO_SECRET_KEY=minio123
 
   createbuckets:
+    platform: linux/amd64
     container_name: createbuckets
-    image: minio/mc
+    image: docker.io/minio/mc
     depends_on:
       - minio
     entrypoint:
@@ -106,10 +113,11 @@ services:
       "
 
   ingress:
+    platform: linux/amd64
     container_name: ingress
     # you can build the image from these sources
     # https://github.com/RedHatInsights/insights-ingress-go
-    image: ingress
+    image: localhost/ingress
     ports:
       - 3000:3000
     environment:
@@ -127,12 +135,14 @@ services:
       - minio
 
   rhobs-mock:
+    platform: linux/amd64
     container_name: rhobs-mock
     image: quay.io/redhat-services-prod/obsint-processing-tenant/obsint-mocks/obsint-mocks:latest
     ports:
       - 8081:8080
 
   mock-oauth2-server:
+    platform: linux/amd64
     container_name: mock-oauth2-server
     image: ghcr.io/navikt/mock-oauth2-server:0.5.8
     environment:
@@ -145,6 +155,7 @@ services:
   ####################################################################################################
 
   ccx-data-pipeline:
+    platform: linux/amd64
     container_name: ccx-data-pipeline
     image: quay.io/redhat-services-prod/obsint-processing-tenant/data-pipeline/data-pipeline:latest
     environment:
@@ -160,7 +171,7 @@ services:
       - LOGLEVEL_INSIGHTS_MESSAGING=DEBUG
       - LOGLEVEL_INSIGHTS=WARNING
     volumes:
-      - ./ccx-data-pipeline.yaml:/config.yaml
+      - ./ccx-data-pipeline.yaml:/config.yaml:z
     command: "ccx-messaging /config.yaml"
     depends_on:
       kafka:
@@ -169,6 +180,7 @@ services:
         condition: service_completed_successfully
 
   db-writer:
+    platform: linux/amd64
     container_name: db-writer
     image: quay.io/redhat-services-prod/obsint-processing-tenant/aggregator/aggregator:latest
     environment:
@@ -200,6 +212,7 @@ services:
         condition: service_started
 
   aggregator:
+    platform: linux/amd64
     container_name: aggregator
     image: quay.io/redhat-services-prod/obsint-processing-tenant/aggregator/aggregator:latest
     environment:
@@ -225,6 +238,7 @@ services:
         condition: service_healthy
 
   content-service:
+    platform: linux/amd64
     container_name: content-service
     image: quay.io/redhat-services-prod/obsint-processing-tenant/content-service/content-service:latest
     environment:
@@ -234,6 +248,7 @@ services:
       - INSIGHTS_CONTENT_SERVICE__GROUPS__PATH=/groups/groups_config.yaml
 
   cache-writer:
+    platform: linux/amd64
     container_name: cache-writer
     image: quay.io/redhat-services-prod/obsint-processing-tenant/aggregator/aggregator:latest
     environment:
@@ -257,13 +272,10 @@ services:
         condition: service_started
       kafka:
         condition: service_healthy
-    deploy:
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
+    restart: on-failure
 
   dvo-extractor:
+    platform: linux/amd64
     container_name: dvo-extractor
     image: quay.io/redhat-services-prod/obsint-processing-tenant/data-pipeline/data-pipeline:latest
     environment:
@@ -281,7 +293,7 @@ services:
       - LOGLEVEL_INSIGHTS_MESSAGING=DEBUG
       - LOGLEVEL_INSIGHTS=WARNING
     volumes:
-      - ./dvo-extractor-config.yaml:/ccx-data-pipeline/config.yaml
+      - ./dvo-extractor-config.yaml:/ccx-data-pipeline/config.yaml:z
     depends_on:
       kafka:
         condition: service_started
@@ -289,6 +301,7 @@ services:
         condition: service_completed_successfully
 
   dvo-writer:
+    platform: linux/amd64
     container_name: dvo-writer
     image: quay.io/redhat-services-prod/obsint-processing-tenant/aggregator/aggregator:latest
     environment:
@@ -333,6 +346,7 @@ services:
         condition: service_completed_successfully
 
   smart-proxy:
+    platform: linux/amd64
     container_name: smart-proxy
     image: quay.io/redhat-services-prod/obsint-processing-tenant/smart-proxy/smart-proxy:latest
     environment:
@@ -362,6 +376,7 @@ services:
       - content-service
 
   ccx-upgrades-data-eng:
+    platform: linux/amd64
     container_name: ccx-upgrades-data-eng
     image: quay.io/redhat-services-prod/obsint-processing-tenant/upgrades-data-eng/upgrades-data-eng:latest
     ports:
@@ -382,12 +397,14 @@ services:
     restart: always  # needed because it takes some time to connect to mock-oauth2-server
  
   ccx-upgrades-inference:
+    platform: linux/amd64
     container_name: ccx-upgrades-inference
     image: quay.io/redhat-services-prod/obsint-processing-tenant/upgrades-inference/upgrades-inference:latest
     ports:
       - 8001:8000
   
   notification-writer:
+    platform: linux/amd64
     container_name: notification-writer
     image: quay.io/redhat-services-prod/obsint-processing-tenant/notification-writer/notification-writer:latest
     environment:
