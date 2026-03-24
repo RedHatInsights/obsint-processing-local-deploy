@@ -22,7 +22,6 @@ services:
       - minio
 
   kafka:
-    platform: linux/amd64
     container_name: kafka
     image: quay.io/ccxdev/kafka-no-zk:latest
     hostname: kafka
@@ -96,7 +95,6 @@ services:
 
   archive-sync:
     image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
-    platform: linux/amd64
     container_name: archive-sync
     command:
       - ccx-messaging
@@ -137,7 +135,6 @@ services:
 
   rules-processing:
     image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
-    platform: linux/amd64
     container_name: rules-processing
     command:
       - ccx-messaging
@@ -175,7 +172,6 @@ services:
 
   parquet-factory:
     image: quay.io/redhat-services-prod/obsint-processing-tenant/parquet-factory/parquet-factory:latest
-    platform: linux/amd64
     container_name: parquet-factory
     command: [ "./parquet-factory" ]
     environment:
@@ -203,7 +199,6 @@ services:
   rules-uploader:
     container_name: rules-uploader
     image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
-    platform: linux/amd64
     command:
       - ccx-messaging
       - /rules-uploader.yaml
