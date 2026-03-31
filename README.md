@@ -12,8 +12,8 @@ files needed to run services for external data pipeline or internal data pipelin
 
 For running the containers using this repository, you need to have:
 
-- Docker
-- Docker Compose
+- Podman
+- Podman Compose (`podman compose`)
 - Git
 
 Both internal and external data pipeline need Ingress image.
@@ -22,13 +22,13 @@ In order to make it available locally, run:
 ```
 git clone https://github.com/RedHatInsights/insights-ingress-go.git
 cd insights-ingress-go
-docker build . -t ingress:latest
+podman build . -t ingress:latest
 ```
 
 ## Deployment
 
 In order to run services of one of the pipelines, navigate to one of the directories
-and run `docker compose up -d`. You can alter the compose YAML and replace the `image`
+and run `podman compose up -d`. You can alter the compose YAML and replace the `image`
 field to substitute the service image(s) with the one containing your changes.
 
 The rest of the YAML files in the directories are configurations needed for Python services

@@ -4,7 +4,7 @@ services:
     container_name: ingress
     # you can build the image from these sources
     # https://github.com/RedHatInsights/insights-ingress-go
-    image: ingress
+    image: localhost/ingress
     ports:
       - 3000:3000
     environment:
@@ -16,24 +16,28 @@ services:
       - INGRESS_MINIOACCESSKEY=minio
       - INGRESS_MINIOSECRETKEY=minio123
       - INGRESS_MINIOENDPOINT=minio:9000
-      - INGRESS_KAFKA_BROKERS=kafka:9092
+      - INGRESS_KAFKA_BROKERS=kafka:29092
     depends_on:
       - kafka
       - minio
 
   kafka:
-    platform: linux/amd64
     container_name: kafka
     image: quay.io/ccxdev/kafka-no-zk:latest
     hostname: kafka
     ports:
       - 9092:9092
+      - 29092:29092
     environment:
       - KAFKA_ADVERTISED_HOST_NAME=kafka
+      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,INTERNAL://0.0.0.0:29092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,INTERNAL://kafka:29092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
       - KAFKA_CREATE_TOPICS=ccx.archive.synced:1:1,platform.upload.announce:1:1,ccx.insights.rules.results:1:1,platform.payload-status:1:1
 
   kafka-topics-waiter:
-    image: edenhill/kcat:1.7.1
+    image: docker.io/edenhill/kcat:1.7.1
     container_name: kafka-topics-waiter
     depends_on:
       - kafka
@@ -62,7 +66,7 @@ services:
 
   minio:
     container_name: minio
-    image: minio/minio:latest
+    image: docker.io/minio/minio:latest
     ports:
       - 9000:9000
       - 9001:9001  # console
@@ -76,7 +80,7 @@ services:
 
   createbuckets:
     container_name: createbuckets
-    image: minio/mc:latest
+    image: docker.io/minio/mc:latest
     depends_on: 
       - minio
     entrypoint: >
@@ -91,13 +95,12 @@ services:
 
   archive-sync:
     image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
-    platform: linux/amd64
     container_name: archive-sync
     command:
       - ccx-messaging
       - /archive-sync.yaml
     volumes:
-      - ./archive-sync.yaml:/archive-sync.yaml
+      - ./archive-sync.yaml:/archive-sync.yaml:z
     environment:
       - KAFKA_URL=kafka:9092
       - KAFKA_SERVER=kafka
@@ -131,15 +134,14 @@ services:
         condition: service_started
 
   rules-processing:
-    image: quay.io/redhat-services-prod/obsint-processing-tenant/data-pipeline/data-pipeline:latest
-    platform: linux/amd64
+    image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
     container_name: rules-processing
     command:
       - ccx-messaging
       - /rules-processing.yaml
     volumes:
-      - ./rules-processing.yaml:/rules-processing.yaml
-      - ./ccx-extract:/var/tmp/ccx
+      - ./rules-processing.yaml:/rules-processing.yaml:z
+      - ./ccx-extract:/var/tmp/ccx:z
     environment:
       - KAFKA_SYNCED_TOPIC=ccx.archive.synced
       - KAFKA_GROUP_ID=ccx-rules-processing-service
@@ -170,7 +172,6 @@ services:
 
   parquet-factory:
     image: quay.io/redhat-services-prod/obsint-processing-tenant/parquet-factory/parquet-factory:latest
-    platform: linux/amd64
     container_name: parquet-factory
     command: [ "./parquet-factory" ]
     environment:
@@ -198,13 +199,11 @@ services:
   rules-uploader:
     container_name: rules-uploader
     image: quay.io/redhat-services-prod/obsint-processing-tenant/ccx-messaging/ccx-messaging:latest
-    platform: linux/amd64
-    working_dir: /data-pipeline
     command:
       - ccx-messaging
       - /rules-uploader.yaml
     volumes:
-      - ./rules-uploader.yaml:/rules-uploader.yaml
+      - ./rules-uploader.yaml:/rules-uploader.yaml:z
     environment:
       - KAFKA_GROUP_ID=rules_uploader_app
       - KAFKA_SERVER=kafka:9092
@@ -238,19 +237,19 @@ services:
         condition: service_started
 
   pushgateway:
-    image: prom/pushgateway:v1.8.0
+    image: docker.io/prom/pushgateway:v1.8.0
     container_name: pushgateway
     ports:
       - "9091:9091"
     restart: unless-stopped
 
   prometheus:
-    image: prom/prometheus:v2.53.1
+    image: docker.io/prom/prometheus:v2.53.1
     container_name: prometheus
     ports:
       - "9090:9090"
     volumes:
-      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml:z
     command:
       - '--config.file=/etc/prometheus/prometheus.yaml'
     restart: unless-stopped
